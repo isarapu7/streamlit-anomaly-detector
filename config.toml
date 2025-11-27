@@ -1,0 +1,3 @@
+[server]
+maxUploadSize = 10000  # Sets the file uploader limit to 10 GB
+maxMessageSize = 10000 # Sets the WebSocket message limit to 10 GB
