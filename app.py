@@ -2,14 +2,15 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import tensorflow as tf
+import matplotlib.pyplot as plt # New Import for plotting
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, roc_curve, roc_auc_score # New Imports for ROC/AUC
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Conv1D, MaxPooling1D, UpSampling1D, Reshape, Dense
 import io
 
 # Set Streamlit Page Configuration
-st.set_page_config(layout="wide", page_title="IDS Anomaly Detection Dashboard")
+st.set_page_config(layout="wide", page_title="IDS Anomaly Detection Dashboard with ROC")
 
 ## --- 1. Model Definition ---
 
@@ -20,21 +21,19 @@ def create_1dcnn_autoencoder(input_dim):
     FILTERS_2 = 16 
     KERNEL_SIZE = 7
 
-    # Encoder
+    # Encoder and Decoder definitions remain the same...
     input_layer = Input(shape=(input_dim, 1))
     x = Conv1D(filters=FILTERS_1, kernel_size=KERNEL_SIZE, activation='relu', padding='same')(input_layer)
     x = MaxPooling1D(pool_size=2, padding='same')(x)
     x = Conv1D(filters=FILTERS_2, kernel_size=KERNEL_SIZE, activation='relu', padding='same')(x)
     encoded = MaxPooling1D(pool_size=2, padding='same')(x) # Bottleneck
 
-    # Decoder
     x = Conv1D(filters=FILTERS_2, kernel_size=KERNEL_SIZE, activation='relu', padding='same')(encoded)
     x = UpSampling1D(2)(x)
     x = Conv1D(filters=FILTERS_1, kernel_size=KERNEL_SIZE, activation='relu', padding='same')(x)
     x = UpSampling1D(2)(x)
     decoded = Conv1D(filters=1, kernel_size=KERNEL_SIZE, activation='linear', padding='same')(x)
 
-    # Reshaping/reconstruction step to ensure output matches input dimension
     if decoded.shape[1] != input_dim:
         x_flat = tf.keras.layers.Flatten()(decoded)
         x_dense = Dense(input_dim, activation='linear')(x_flat)
@@ -50,7 +49,6 @@ def create_1dcnn_autoencoder(input_dim):
 def load_and_preprocess_data(uploaded_file):
     """Loads and preprocesses the KDD dataset from an uploaded CSV file."""
     
-    # Define column names (41 features + 1 class)
     column_names = [
         'duration', 'protocol_type', 'service', 'flag', 'src_bytes', 'dst_bytes', 'land',
         'wrong_fragment', 'urgent', 'hot', 'num_failed_logins', 'logged_in',
@@ -75,7 +73,7 @@ def load_and_preprocess_data(uploaded_file):
         st.info("Ensure your uploaded file is a standard KDD dataset (42 columns) and is not corrupted.")
         return None, None, None, None
 
-    # Preprocessing
+    # Preprocessing remains the same...
     numeric_cols = df.columns.drop(['protocol_type', 'service', 'flag', 'class'])
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -148,8 +146,6 @@ def get_unique_categories():
 def predict_single_sample(model, scaler, all_feature_names, batch_threshold, protocol, service, flag, duration, serror_rate):
     """
     Creates a single sample DataFrame, preprocesses it, and predicts the MAE.
-    
-    We use dummy values for the 38 numerical features and only accept a few key inputs.
     """
     
     # 1. Define placeholder for ALL 41 features
@@ -167,16 +163,12 @@ def predict_single_sample(model, scaler, all_feature_names, batch_threshold, pro
         'dst_host_srv_rerror_rate'
     ]
     
-    # Create the sample row with placeholder values (list of 0s)
     sample_data = [0] * len(column_names)
     sample_df = pd.DataFrame([sample_data], columns=column_names)
     
-    # Inject user inputs into the DataFrame
     sample_df['protocol_type'] = protocol
     sample_df['service'] = service
     sample_df['flag'] = flag
-    
-    # Inject specific numerical inputs
     sample_df['duration'] = duration
     sample_df['serror_rate'] = serror_rate
     
@@ -184,16 +176,14 @@ def predict_single_sample(model, scaler, all_feature_names, batch_threshold, pro
     categorical_cols = ['protocol_type', 'service', 'flag']
     sample_df = pd.get_dummies(sample_df, columns=categorical_cols, drop_first=True)
 
-    # 3. Re-align columns (Crucial step to match the shape of the trained model's input)
+    # 3. Re-align columns 
     missing_cols = set(all_feature_names) - set(sample_df.columns)
     for c in missing_cols:
-        sample_df[c] = 0 # Add missing one-hot columns as 0
+        sample_df[c] = 0
     
-    # Drop any extra columns that weren't in the training set 
     extra_cols = set(sample_df.columns) - set(all_feature_names)
     sample_df.drop(list(extra_cols), axis=1, inplace=True)
     
-    # Final column order must match all_feature_names
     sample_df = sample_df[all_feature_names]
 
     # 4. Scale the data
@@ -220,7 +210,6 @@ def main():
     # --- Sidebar for Configuration ---
     st.sidebar.header("⚙️ Model Configuration")
     
-    # Training Epochs Control
     epochs = st.sidebar.slider(
         'Training Epochs',
         min_value=5, max_value=50, value=15, step=5,
@@ -228,7 +217,6 @@ def main():
     )
     st.sidebar.info(f"Model will train for **{epochs}** epochs.")
 
-    # Anomaly Threshold Control
     threshold_percentile = st.sidebar.slider(
         'Anomaly Threshold Percentile (Sensitivity)',
         min_value=90, max_value=99, value=95, step=1,
@@ -279,15 +267,14 @@ def main():
             # Cache the model object for the single prediction interface
             st.session_state['trained_model'] = model
 
-            # Calculate threshold and prediction based on user percentile input
+            # Calculate threshold and prediction
             mae_normal = mae[y_true == 0]
-            
-            # Recalculate threshold using the current sidebar value
             threshold = np.percentile(mae_normal, threshold_percentile)
             y_pred = (mae > threshold).astype(int)
             
-            # Store threshold for the single prediction interface
             st.session_state['batch_threshold'] = threshold
+            st.session_state['y_true'] = y_true # Store true labels for ROC
+            st.session_state['mae'] = mae       # Store MAE for ROC
 
             st.success("Batch Analysis Complete! (Model is now ready for real-time testing)")
             st.markdown("---")
@@ -295,19 +282,17 @@ def main():
             # --- 5. Evaluation Section ---
             st.header("3. Evaluation Results")
 
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3) # Changed to 3 columns for ROC curve
             
             with col1:
                 st.subheader("Performance Metrics")
                 
                 st.markdown(f"**Calculated Threshold ({threshold_percentile}th Pct.):** $\\mathbf{{{threshold:.4f}}}$")
                 
-                # Display key counts
                 st.metric("Total Samples", len(y_true))
                 st.metric("True Anomalies (Actual)", np.sum(y_true))
                 st.metric("Detected Anomalies (Predicted)", np.sum(y_pred))
 
-                # Classification Report Table
                 report = classification_report(y_true, y_pred, target_names=['Normal (0)', 'Anomaly (1)'], output_dict=True)
                 report_df = pd.DataFrame(report).transpose()
                 report_df.loc[['accuracy'], ['precision', 'recall', 'f1-score', 'support']] = ['-', '-', '-', report_df.loc['accuracy', 'support']]
@@ -321,10 +306,36 @@ def main():
                 st.markdown("**Key Interpretation:**")
                 st.text(f"False Positives (FP - False Alarms): {cm[0, 1]}")
                 st.text(f"False Negatives (FN - Missed Attacks): {cm[1, 0]}")
+
+            with col3:
+                st.subheader("ROC Curve Analysis")
                 
+                # --- ROC Curve Calculation and Plotting ---
+                # The prediction score for the anomaly class is the MAE itself (higher MAE = higher probability of anomaly)
+                
+                # Use the inverse of MAE for ROC if MAE is used as a probability, but AUC
+                # works correctly if we just pass MAE and assume anomalies are the positive class (1).
+                
+                # ROC curve plots True Positive Rate (TPR) vs False Positive Rate (FPR)
+                # Note: We must negate MAE if we treat MAE as a score where higher is better.
+                # Since MAE is error, higher MAE = higher anomaly likelihood, so we use MAE directly as the score.
+                
+                fpr, tpr, thresholds = roc_curve(y_true, mae, pos_label=1)
+                roc_auc = roc_auc_score(y_true, mae)
+
+                fig, ax = plt.subplots()
+                ax.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.4f})')
+                ax.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+                ax.set_xlim([0.0, 1.0])
+                ax.set_ylim([0.0, 1.05])
+                ax.set_xlabel('False Positive Rate (FPR)')
+                ax.set_ylabel('True Positive Rate (TPR / Recall)')
+                ax.set_title('Receiver Operating Characteristic (ROC)')
+                ax.legend(loc="lower right")
+                st.pyplot(fig)
+                plt.close(fig)
+
             st.markdown("---")
-            
-            # NOTE: Removed Section 4: Inspecting Reconstruction Error
 
     
     # -------------------------------------------------------------
@@ -334,7 +345,6 @@ def main():
         st.markdown("---")
         st.header("4. 🕵️ Real-Time Connection Checker")
         
-        # Retrieve necessary components
         model = st.session_state['trained_model']
         scaler_obj = st.session_state['scaler_obj']
         all_feature_names = st.session_state['all_feature_names']
@@ -346,7 +356,6 @@ def main():
 
         colA, colB, colC = st.columns(3)
         
-        # 1. Categorical Inputs 
         with colA:
             st.subheader("Connection Properties")
             input_protocol = st.selectbox("Protocol Type", protocol_types)
@@ -361,7 +370,6 @@ def main():
             st.subheader("Error Rate")
             input_serror_rate = st.number_input("Serror Rate (0.0 to 1.0)", min_value=0.0, max_value=1.0, value=0.0, step=0.01)
             
-        # --- Submit Button ---
         if st.button("Analyze Connection Status", key="single_predict", type="secondary"):
             
             with st.spinner("Analyzing connection..."):
@@ -389,3 +397,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
