@@ -8,6 +8,7 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Conv1D, MaxPooling1D, UpSampling1D, Reshape, Dense, Flatten
 import io
 import plotly.express as px
+from packaging import version # Import packaging for version checking
 
 # Set Streamlit Page Configuration
 st.set_page_config(layout="wide", page_title="1D-CNN Autoencoder Anomaly Detection")
@@ -151,11 +152,22 @@ def main():
         
         st.header("1. Upload Dataset")
         
-        uploaded_file = st.file_uploader(
-            "Choose a CSV file (KDD-style dataset) - **Max size: 1000 MB**", 
-            type="csv",
-            max_uploader_size=1000 
-        )
+        # Check Streamlit version for 'max_uploader_size' support (added in v1.14.0)
+        file_uploader_args = {
+            "label": "Choose a CSV file (KDD-style dataset) - **Max size: 1000 MB**",
+            "type": "csv"
+        }
+        
+        try:
+            # Check if current version is greater than or equal to 1.14.0
+            if version.parse(st.__version__) >= version.parse("1.14.0"):
+                file_uploader_args["max_uploader_size"] = 1000
+                
+        except:
+            # Handle case where st.__version__ or packaging isn't available/parses correctly
+            pass
+
+        uploaded_file = st.file_uploader(**file_uploader_args)
 
         if uploaded_file is not None:
             
@@ -302,4 +314,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # Ensure packaging is installed for the version check (optional, but good practice)
+    try:
+        import packaging.version
+    except ImportError:
+        pass 
+        
     main()
